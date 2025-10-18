@@ -1,0 +1,11 @@
+Ticket ID,Issue,Description,Category,Date
+TCKT-2000,VPN connection timeout,VPN connection times out frequently during use.,Network,2024-02-09
+TCKT-2001,Emails not syncing on mobile,User's emails are not syncing properly on their mobile device.,Software,2024-02-10
+TCKT-2002,New software installation request,A request to install new project management software.,Software,2024-02-11
+TCKT-2003,Laptop screen flickering,The laptop screen starts flickering intermittently during use.,Hardware,2024-02-12
+TCKT-2004,Cannot open files in shared drive,User reports an error when trying to open files in the shared drive.,Network,2024-02-13
+TCKT-2005,Printer not connecting to WiFi,WiFi printer is not connecting to any devices in the office.,Hardware,2024-02-14
+TCKT-2006,Application performance issue,Performance of the internal application is slow and laggy.,Software,2024-02-15
+TCKT-2007,Lost password for multiple accounts,A user has lost passwords for multiple accounts and needs resets.,Account Management,2024-02-16
+TCKT-2008,Server access denied,User cannot access the server with their current credentials.,Network,2024-02-17
+TCKT-2009,Spam filter blocking client emails,The company's spam filter is incorrectly blocking emails from a client.,Software,2024-02-18

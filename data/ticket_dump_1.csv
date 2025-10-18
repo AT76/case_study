@@ -1,0 +1,11 @@
+Ticket ID,Issue,Category,Resolution,Date,Agent Name,Resolved,Description
+TCKT-1010,Email synchronization error,Software,Reconfigured email settings,2024-01-20,Alice Johnson,True,"Emails not syncing correctly across devices, causing communication delays. This is a recurring issue."
+TCKT-1011,VPN disconnection issues,Network,VPN settings updated,2024-01-21,Bob Smith,False,Repeated VPN disconnections impacting remote access to company network. This is a recurring issue.
+TCKT-1012,Password reset issue,Account Management,Password reset successfully,2024-01-22,Cathy Brown,True,User unable to reset password due to system error. This is a recurring issue.
+TCKT-1013,Request for software installation rights,Software,Installation permissions granted,2024-01-23,David Clark,False,Employee requesting installation rights for new software. This is a recurring issue.
+TCKT-1044,Printer connectivity problem,Hardware,Printer driver reinstalled,2024-01-24,Eva Adams,True,Printer not connecting to any devices in the office. This is a recurring issue.
+TCKT-1045,Laptop overheating and shutting down,Hardware,Cooling system cleaned,2024-01-25,Frank Wright,False,"Laptop frequently overheating, causing concern for hardware damage. This is a recurring issue."
+TCKT-1046,Mobile app not working properly,Software,App reinstalled and updated,2024-01-26,Gina Hall,True,Mobile application crashes every time it\'s opened. This is a recurring issue.
+TCKT-1047,Shared drive access issue,Network,Drive access permissions corrected,2024-01-27,Harry Lopez,False,Issues with permissions preventing access to the shared company drive. This is a recurring issue.
+TCKT-1048,Problem with emails marked as spam,Software,Email filter settings adjusted,2024-01-28,Ivy Taylor,True,"Important emails being sent to spam, missing critical communications. This is a recurring issue."
+TCKT-1049,PC blue screen error,Hardware,Operating system reinstalled,2024-01-29,Jack Martinez,False,"Repeated blue screen errors on PC, preventing work. This is a recurring issue."
