@@ -1,0 +1,4 @@
+*/__pycache__
+.env
+/chroma_store
+/.chainlit
