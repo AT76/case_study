@@ -9,7 +9,6 @@ from src.build_index import (
     row_to_doc,
     deduplicate_documents,
     DATA_DIR,
-    PERSIST_DIR,
     COLLECTION,
     MODEL_NAME,
 )

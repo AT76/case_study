@@ -1,208 +1,153 @@
 import os
 import logging
 import asyncio
-from typing import AsyncGenerator, List, Optional, Any
+from typing import List, Dict, Any, Optional
 
 from dotenv import load_dotenv
 
 import chainlit as cl
-from huggingface_hub import AsyncInferenceClient
 from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_core.documents import Document
+from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint
 
-load_dotenv()
+from langchain.agents.middleware import dynamic_prompt, ModelRequest, SummarizationMiddleware
+from langchain.agents import create_agent
+from langgraph.checkpoint.memory import InMemorySaver  
 
-# Config
-EMBED_MODEL = os.getenv("EMBED_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
-CHROMA_DIR = os.getenv("PERSIST_DIR", "chroma_store")
-COLLECTION = os.getenv("COLLECTION", "tickets")
 
-CHAT_MODEL = os.getenv("CHAT_MODEL", "meta-llama/Llama-3.1-8B-Instruct")
-HF_TOKEN = os.getenv("HF_TOKEN", None)
-HF_PROVIDER = os.getenv("HF_PROVIDER", "novita")
-
-MAX_NEW_TOKENS = int(os.getenv("MAX_NEW_TOKENS", "300"))
-TEMPERATURE = float(os.getenv("TEMPERATURE", "0.2"))
-
-# Configure logging
-logger = logging.getLogger(__name__)
-if not logger.handlers:
+def setup_logging():
     logging.basicConfig(level=logging.INFO)
+    return logging.getLogger(__name__)
 
 
-# Retrieval Setup
-embeddings = HuggingFaceEmbeddings(
-    model_name=EMBED_MODEL,
-    encode_kwargs={"normalize_embeddings": True},
-)
-
-vectorstore = Chroma(
-    collection_name=COLLECTION,
-    embedding_function=embeddings,
-    persist_directory=CHROMA_DIR,
-)
-
-retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
-
-
-# Generation Setup
-# Create client lazily so the app can start even if HF creds are missing.
-client: Optional[AsyncInferenceClient] = None
-if HF_PROVIDER:
-    try:
-        client = AsyncInferenceClient(provider=HF_PROVIDER, api_key=HF_TOKEN)
-    except Exception as e:
-        logger.warning("Failed to initialize HF AsyncInferenceClient: %s", e)
-        client = None
+# Configuration loader
+def load_config() -> Dict[str, Any]:
+    load_dotenv()
+    return {
+        "EMBED_MODEL": os.getenv("EMBED_MODEL", "sentence-transformers/all-MiniLM-L6-v2"),
+        "CHROMA_DIR": os.getenv("PERSIST_DIR", "chroma_store"),
+        "COLLECTION": os.getenv("COLLECTION", "tickets"),
+        "CHAT_MODEL": os.getenv("CHAT_MODEL", "meta-llama/Llama-3.1-8B-Instruct"),
+        "HF_TOKEN": os.getenv("HF_TOKEN"),
+        "MAX_NEW_TOKENS": int(os.getenv("MAX_NEW_TOKENS", "800")),
+        "TEMPERATURE": float(os.getenv("TEMPERATURE", "0.2")),
+    }
 
 
-async def generate_answer_via_api(question: str, context: str) -> AsyncGenerator[str, None]:
-    if client is None:
-        raise RuntimeError("HF AsyncInferenceClient not configured. Set HF_TOKEN/HF_PROVIDER.")
-
-    prompt_context = (
-        f"Here are similar solved tickets:\n{context}\n\n"
-        f"New ticket: {question}\n\n"
-        "Please suggest a helpful direction (steps or checks) the agent should take. "
-        "Don't answer questions that are not related to IT helpdesk support."
+# Service builders
+def build_retriever(cfg: Dict[str, Any]):
+    embeddings = HuggingFaceEmbeddings(
+        model_name=cfg["EMBED_MODEL"], 
+        encode_kwargs={"normalize_embeddings": True}
     )
-    messages = [
-        {"role": "system", "content": "You are an IT helpdesk assistant."},
-        {"role": "user", "content": prompt_context},
-    ]
+    vectorstore = Chroma(
+        collection_name=cfg["COLLECTION"],
+        embedding_function=embeddings,
+        persist_directory=cfg["CHROMA_DIR"],
+    )
+    return vectorstore.as_retriever(search_kwargs={"k": 3})
 
-    resp_stream = None
-    closed = False
-    try:
-        resp_stream = await client.chat.completions.create(
-            model=CHAT_MODEL,
-            messages=messages,
-            max_tokens=MAX_NEW_TOKENS,
-            temperature=TEMPERATURE,
-            stream=True,
+
+def build_chat_model(cfg: Dict[str, Any]) -> ChatHuggingFace:
+    llm = HuggingFaceEndpoint(
+        repo_id=cfg["CHAT_MODEL"],
+        task="text-generation",
+        max_new_tokens=cfg["MAX_NEW_TOKENS"],
+        do_sample=True,
+        temperature=cfg["TEMPERATURE"],
+        huggingfacehub_api_token=cfg["HF_TOKEN"],
+        provider="auto",
+    )
+    return ChatHuggingFace(llm=llm, verbose=True)
+
+
+def build_rag_agent(cfg: Dict[str, Any]):
+    retriever = build_retriever(cfg)
+    chat_model = build_chat_model(cfg)
+
+    @dynamic_prompt
+    def prompt_with_context(request: ModelRequest) -> str:
+        user_query = request.state["messages"][-1].text
+        docs = retriever.invoke(user_query)
+
+        # Filter to unique IDs
+        seen_ids = set()
+        unique_docs = []
+        for doc in docs:
+            ticket_id = doc.metadata.get("id") or "unknown"
+            if ticket_id in seen_ids:
+                continue
+            seen_ids.add(ticket_id)
+            unique_docs.append((ticket_id, doc.page_content))
+
+        # Format context
+        context = "\n\n".join(
+            f"- Ticket: {tid}\n{content}"
+            for (tid, content) in unique_docs
         )
 
-        def _extract_content_from_chunk(chunk: Any) -> Optional[str]:
-            if not chunk or not getattr(chunk, "choices", None):
-                return None
-            delta = getattr(chunk.choices[0], "delta", None)
-            return getattr(delta, "content", None) if delta else None
+        return f"""
+            You are an AI assistant working at Aleph Alpha, helping IT service agents handle incoming help-desk tickets.
 
-        async for chunk in resp_stream:
-            if closed:
-                break
-            content = _extract_content_from_chunk(chunk)
-            if content:
-                yield content
+            Your task:
+            1. Read the incoming ticket description.
+            2. Read the summaries of relevant past tickets (each with its unique Ticket ID).
+            3. **Always reference** the Ticket IDs from the past tickets when you mention them.
+            4. Provide a **concise, professional suggestion** (not a full solution) that helps the agent decide on next steps.
 
-    except (asyncio.CancelledError, GeneratorExit):
-        closed = True
-        if resp_stream is not None:
-            try:
-                asyncio.create_task(resp_stream.aclose())
-            except Exception:
-                pass
-        return
-    except Exception as exc:
-        logger.error("Error during API call or streaming: %s", exc)
-        yield f"\n\n[Error: {exc}]\n"
-        return
-    finally:
-        # No yields here
-        if resp_stream is not None:
-            try:
-                asyncio.create_task(resp_stream.aclose())
-            except Exception:
-                logger.warning("Failed to schedule response stream close cleanly.")
+            Incoming ticket:
+            {user_query}
 
+            Relevant past tickets:
+            {context}
 
-def _retrieve_similar_documents(query: str) -> List[Document]:
-    """
-    Retrieve similar documents using the retriever. Handles common retriever APIs:
-    - get_relevant_documents
-    - retrieve
-    - invoke
+            Instructions:
+            - Use information from the relevant past tickets to guide your suggestion.
+            - Do **not** invent a complete answer, you’re providing **direction** only.
+            - Maintain a professional, clear tone appropriate for an IT service desk environment.
+            - Limit your answer to about 3-5 sentences.
+            - Always end your response with a list of the Ticket IDs you referenced, in the format: "Referenced Ticket IDs: [ID1, ID2, ...]"
+            - At the end of your response, ask the user if they need further assistance.
+        """
 
-    Returns:
-        list of Document
-    Raises:
-        RuntimeError if no supported retrieval method is found.
-    """
-    # Try common LangChain retriever methods (they are usually synchronous)
-    if hasattr(retriever, "get_relevant_documents"):
-        return retriever.get_relevant_documents(query)
-    if hasattr(retriever, "retrieve"):
-        return retriever.retrieve(query)
-    if hasattr(retriever, "invoke"):
-        return retriever.invoke(query)
-    raise RuntimeError("Retriever does not implement a supported interface.")
+    rag_agent = create_agent(
+        chat_model,
+        tools=[],
+        middleware=[
+            prompt_with_context,
+            SummarizationMiddleware(
+                model=chat_model,
+                max_tokens_before_summary=4000,
+                messages_to_keep=20,
+            ),
+        ],
+        checkpointer=InMemorySaver(),
+    )
+
+    return rag_agent
 
 
 @cl.on_chat_start
-async def start():
-    """Send an initial greeting when the chat starts."""
-    await cl.Message(
-        content=(
-            "Hello! Paste your IT-ticket (symptoms + environment + what's been tried) "
-            "and I'll suggest a direction."
-        )
-    ).send()
+async def start_chat():
+    await cl.Message(content="Welcome! Describe your IT helpdesk ticket below to get assistance").send()
 
 
 @cl.on_message
-async def on_message(message: cl.Message):
-    """
-    Main handler for incoming user messages.
+async def handle_message(message: cl.Message):
+    user_query = message.content
+    rag_agent = build_rag_agent(load_config())
 
-    Steps:
-    1) Retrieve similar tickets from the vector store.
-    2) De-duplicate by ticket id.
-    3) Stream model completion tokens back to the client.
-    """
-    user_q = (message.content or "").strip()
-    if not user_q:
-        await cl.Message(content="Please provide the ticket details.").send()
-        return
+    response = await rag_agent.ainvoke(
+        {"messages": [{"role": "user", "content": user_query}]},
+        {"configurable": {"thread_id": "helpdesk-session"}}
+    )
+    # Assume response["messages"][-1].content is the assistant reply
+    await cl.Message(content=response["messages"][-1].content).send()
 
-    # 1) Retrieve similar tickets (defensive wrapper to support multiple retriever implementations)
-    try:
-        docs = _retrieve_similar_documents(user_q) or []
-    except Exception as e:
-        logger.exception("Failed to retrieve documents: %s", e)
-        await cl.Message(content=f"Error retrieving similar tickets: {e}").send()
-        return
 
-    # 2) Filter duplicates by ticket id (if metadata contains "id")
-    filtered: List[Document] = []
-    seen = set()
-    for d in docs:
-        tid = None
-        try:
-            tid = d.metadata.get("id") if getattr(d, "metadata", None) else None
-        except Exception:
-            tid = None
-        if tid and tid in seen:
-            continue
-        if tid:
-            seen.add(tid)
-        filtered.append(d)
-    docs = filtered
-
-    # Build context string to feed to the generation prompt
-    context_str = "\n\n---\n\n".join(getattr(d, "page_content", "") for d in docs)
-
-    # 3) Generate answer via streaming
-    try:
-        msg = await cl.Message(content="").send()
-        async for token in generate_answer_via_api(user_q, context_str):
-            try:
-                await msg.stream_token(token)
-            except asyncio.CancelledError:
-                break   # user closed UI; stop cleanly
-            except Exception:
-                logger.exception("Failed to stream token; continuing.")
-        await msg.update()
-    except Exception as e:
-        logger.exception("Error during generation/streaming: %s", e)
-        await cl.Message(content=f"An error occurred while generating a response: {e}").send()
+def main():
+    logger = setup_logging()
+    logger.info("Starting Chainlit RAG IT-Helpdesk App...")
+    cfg = load_config()
+    build_rag_agent(cfg)
+    logger.info("RAG agent ready")
