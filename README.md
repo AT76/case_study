@@ -90,6 +90,7 @@ source .venv/bin/activate
 
 ## 5. Assumptions
 - We assume that resolved tickets are meaningfully similar to future incoming tickets (e.g., category, issue type)
+- We assume that embedding the selected fields, Title, Description, Resolution, produces sufficiently rich semantic vectors to enable meaningful similarity matching across tickets
 - We set `k = 3` for retrieval by default, giving the top-3 most similar past tickets
 - Suggestions are **directions** rather than full solutions -> the agent still needs to check answers
 - The system is intended for internal agents, not end-customers, therefore IT-help-desk knowledge is required
