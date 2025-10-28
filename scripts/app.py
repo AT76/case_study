@@ -1,8 +1,6 @@
 import os
 import logging
-import asyncio
-from typing import List, Dict, Any, Optional
-
+from typing import Dict, Any
 from dotenv import load_dotenv
 
 import chainlit as cl
@@ -16,8 +14,13 @@ from langgraph.checkpoint.memory import InMemorySaver
 
 
 def setup_logging():
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
     return logging.getLogger(__name__)
+
+logger = setup_logging()
 
 
 # Configuration loader
@@ -36,6 +39,7 @@ def load_config() -> Dict[str, Any]:
 
 # Service builders
 def build_retriever(cfg: Dict[str, Any]):
+    logger.info(f"Building retriever with embed model {cfg['EMBED_MODEL']} and persist dir {cfg['CHROMA_DIR']}")
     embeddings = HuggingFaceEmbeddings(
         model_name=cfg["EMBED_MODEL"], 
         encode_kwargs={"normalize_embeddings": True}
@@ -45,10 +49,11 @@ def build_retriever(cfg: Dict[str, Any]):
         embedding_function=embeddings,
         persist_directory=cfg["CHROMA_DIR"],
     )
-    return vectorstore.as_retriever(search_kwargs={"k": 3})
+    return vectorstore
 
 
 def build_chat_model(cfg: Dict[str, Any]) -> ChatHuggingFace:
+    logger.info(f"Building chat model {cfg['CHAT_MODEL']}")
     llm = HuggingFaceEndpoint(
         repo_id=cfg["CHAT_MODEL"],
         task="text-generation",
@@ -58,36 +63,70 @@ def build_chat_model(cfg: Dict[str, Any]) -> ChatHuggingFace:
         huggingfacehub_api_token=cfg["HF_TOKEN"],
         provider="auto",
     )
+    logger.info("Chat model ready")
     return ChatHuggingFace(llm=llm, verbose=True)
 
 
 def build_rag_agent(cfg: Dict[str, Any]):
+    logger.info("Building RAG agent...")
     retriever = build_retriever(cfg)
     chat_model = build_chat_model(cfg)
 
     @dynamic_prompt
     def prompt_with_context(request: ModelRequest) -> str:
         user_query = request.state["messages"][-1].text
-        docs = retriever.invoke(user_query)
+        logger.info("Received user query: %s", user_query)
 
-        # Filter to unique IDs
+        docs_with_scores = retriever.similarity_search_with_score(user_query, k=3)
+        logger.info(f"Retrieved {len(docs_with_scores)} past tickets for query")
+
+        # Distance threshold
+        MAX_DISTANCE = 1.105
+
+        # Filter and ensure unique ticket IDs
         seen_ids = set()
-        unique_docs = []
-        for doc in docs:
+        filtered_unique = []
+        for doc, score in docs_with_scores:
             ticket_id = doc.metadata.get("id") or "unknown"
+            if score > MAX_DISTANCE:
+                logger.info(f"Skipping ticket {ticket_id} with distance {score} above threshold {MAX_DISTANCE}")
+                continue
             if ticket_id in seen_ids:
+                logger.debug(f"Skipping duplicate ticket id: {ticket_id}")
                 continue
             seen_ids.add(ticket_id)
-            unique_docs.append((ticket_id, doc.page_content))
+            filtered_unique.append((ticket_id, doc.page_content, score))
+
+        # Fallback if no docs found
+        if not filtered_unique:
+            logger.info("No relevant past tickets found, using fallback prompt.")
+            return """
+                You are an AI assistant helping IT service agents with help-desk tickets.
+
+                I could not find any previously resolved tickets closely matching this new incoming ticket.
+
+                Incoming ticket:
+                {user_query}
+
+                Since no past similar cases were retrieved, acknowledge the lack of prior context. Then suggest that the agent:
+                - ask the requester for additional details (for example: error logs, steps already tried, user environment)
+                - consider escalating the ticket or consulting a subject-matter expert
+                - reference that you had no prior similar cases and end with asking if the agent needs further assistance.
+
+                Example ending: “Referenced Ticket IDs: []”
+            """.format(user_query=user_query)
+
+        logger.info(f"Found {len(filtered_unique)} past tickets for context")
 
         # Format context
         context = "\n\n".join(
-            f"- Ticket: {tid}\n{content}"
-            for (tid, content) in unique_docs
+            f"- Ticket: {tid} (distance: {score:.2f})\n{content}"
+            for (tid, content, score) in filtered_unique
         )
 
+        # Normal case 
         return f"""
-            You are an AI assistant working at Aleph Alpha, helping IT service agents handle incoming help-desk tickets.
+            You are an AI assistant, helping IT service agents handle incoming help-desk tickets.
 
             Your task:
             1. Read the incoming ticket description.
@@ -102,12 +141,12 @@ def build_rag_agent(cfg: Dict[str, Any]):
             {context}
 
             Instructions:
-            - Use information from the relevant past tickets to guide your suggestion.
-            - Do **not** invent a complete answer, you’re providing **direction** only.
-            - Maintain a professional, clear tone appropriate for an IT service desk environment.
-            - Limit your answer to about 3-5 sentences.
+            - Use information from the relevant past tickets to guide your suggestion
+            - Do **not** invent a complete answer, you’re providing **direction** only
+            - Maintain a professional, clear tone appropriate for an IT service desk environment
+            - If you are asked about something not related to IT helpdesk tickets, respond with "I'm sorry, I can only assist with IT helpdesk tickets."
             - Always end your response with a list of the Ticket IDs you referenced, in the format: "Referenced Ticket IDs: [ID1, ID2, ...]"
-            - At the end of your response, ask the user if they need further assistance.
+            - At the end of your response, ask the user if they need further assistance
         """
 
     rag_agent = create_agent(
@@ -123,31 +162,67 @@ def build_rag_agent(cfg: Dict[str, Any]):
         ],
         checkpointer=InMemorySaver(),
     )
+    logger.info("RAG agent built successfully")
 
     return rag_agent
 
 
 @cl.on_chat_start
 async def start_chat():
-    await cl.Message(content="Welcome! Describe your IT helpdesk ticket below to get assistance").send()
+    logger.info("Starting Chainlit chat session...")
+    rag_agent = build_rag_agent(load_config())
+    cl.user_session.set("agent", rag_agent)
+    logger.info("RAG agent stored in user session")
+
+
+@cl.on_stop
+def on_stop():
+    logger.info("Chat session stopped")
+
+
+@cl.set_starters
+async def set_starters():
+    return [
+        cl.Starter(
+            label="VPN keeps disconnecting",
+            message="A user reports the VPN connection drops after 5-10 minutes of use. What direction can you give the agent based on past ticket history?",
+            icon="/public/network.svg",
+        ),
+        cl.Starter(
+            label="Shared drive access denied",
+            message="An employee cannot access the shared company drive despite having permissions. Suggest a next step for the service agent.",
+            icon="/public/drive.svg",
+        ),
+        cl.Starter(
+            label="Laptop battery not charging",
+            message="A user’s laptop battery is not charging even when plugged in. Provide guidance for the agent on how to move forward.",
+            icon="/public/battery.svg",
+        ),
+    ]
+
 
 
 @cl.on_message
 async def handle_message(message: cl.Message):
     user_query = message.content
-    rag_agent = build_rag_agent(load_config())
+    logger.info(f"Received user message: {user_query}")
+    rag_agent = cl.user_session.get("agent")
 
     response = await rag_agent.ainvoke(
         {"messages": [{"role": "user", "content": user_query}]},
         {"configurable": {"thread_id": "helpdesk-session"}}
     )
-    # Assume response["messages"][-1].content is the assistant reply
+    logger.info("Sending response back to user")
     await cl.Message(content=response["messages"][-1].content).send()
 
 
 def main():
     logger = setup_logging()
     logger.info("Starting Chainlit RAG IT-Helpdesk App...")
-    cfg = load_config()
-    build_rag_agent(cfg)
-    logger.info("RAG agent ready")
+
+    from chainlit.cli import run_chainlit
+    run_chainlit(__file__)
+
+
+if __name__ == "__main__":
+    main()
