@@ -1,35 +1,129 @@
-# Aleph Alpha AI Solutions Engineer Case Study
+# 1. Project Overview
 
-Congratulations on making it to the case study round! We appreciate your time and effort so far and are really excited to see what you will come up with during this case study. During this round, we will present you with a case study to give you the opportunity to showcase your skills. It will be open-ended, and you will have the freedom to tackle the problem as you please.
+This project implements a Retrieval-Augmented Generation (RAG) assistant for IT help-desk ticket management.  
+The goal is to support service-agents by suggesting directions for incoming tickets, using previously resolved tickets as context.  
+It is structured as a lightweight app: `embeddings of past tickets` - `vector-store retrieval` - `generation of suggestions`
 
-## Deliverables
-There are two sets of deliverables and a presentation:
-- Code Artifact: Present a solution that goes beyond a simple Python script. For example, this could be in the form of a simple API, a Gradio/Streamlit app, or a Python package. Be creative!
-- Documentation: Document your assumptions, approach, and considerations while you work on the problem. Include all the results of your experimentation and the shortcomings of your solution. Give a brief explanation of how you would proceed if you had more time.
-- Presentation: You should be prepared to present your code artifact and documentation to us in some form. You will have 20 minutes to present your solution, and we will reserve the remaining time for questions. Please note that you don't need to prepare any extra slides. A walkthrough of the code artifact and documentation are sufficient.
+# 2. Repository Structure
 
-## What we are providing
-- Data: Navigate to the `data/`folder in the repository to find the data you need for the task. In `old_tickets` you will find tickets that have been resolved before and in `new_tickets.csv` you will find tickets that you can use test and evaluate your solution.
+- The project is stored in a **private GitHub repository**
+- It uses a virtual environment to isolate dependencies
+- Directory layout:
+```bash
+  ├── src/
+  │   └── build_index.py        # Embedding generation & indexing logic
+  ├── scripts/
+  │   └── app.py                # Application / agent setup
+  ├── data/
+  │   └── old_tickets/…         # Resolved-tickets CSV/XLSX/JSON data
+  ├── tests/                    # Unit-tests & evaluation
+  ├── pyproject.toml            # Dependencies
+  ├── uv.lock                   # Locked dependencies
+  ├── .env                      # Secrets
+  └── README.md                 # Overview
 
-## Case Background
-You are working at Aleph Alpha as an AI Solutions Engineer. You have a client who runs IT helpdesks for different companies. A lot of the tickets the client handles are redundant and might just need a little tweak to solve the problem of the client's customer. For each previously resolved ticket, there is a description of how the problem was solved. The issue is that service agents often don't know if and how a problem has been solved before by someone else. Therefore, the client wants to build a new feature that would assist their agents while working on incoming new tickets, utilizing the information from tickets that have been resolved before. The goal is to use previous tickets to aid the agent in finding a solution for incoming new tickets.
+  ```
 
-Hint: You don't need to provide a solution to the agent; it is enough to provide a direction that might lead the agent to solving the ticket.
+## 3. Environment Setup
 
-## Task
-First, we are interested in the steps you would take to understand the problem and propose a solution. Second, use the tools of your choice to build a simple prototype that could assist the agent. We will provide a "database" of previous tickets that have been solved and some tickets that you can evaluate your prototype on. The focus of the task should be more on the approach and considerations you make than the quality of the final output. Please don't spend more than 3-5 hours on this task, but rather tell us what more you could have done if you had more time.
+#### Virtual Environment & Dependency Management
+We use **uv** as our dependency management tool, using`pyproject.toml` for dependency declarations and `uv.lock` to lock exact versions
 
-Hint: Use your time wisely; an imperfect solution is better than an incomplete solution.
+#### 1. Clone the repository
+```bash
+git clone https://github.com/AT76/case_study.git
+```
+#### 2. Install uv 
+```bash
+pip install uv
+```
+#### Or using brew:
+```bash
+brew install uv
+```
+#### 3. Install dependencies and sync from lockfile
+```bash
+uv sync           # reads `uv.lock` and installs exact versions
+```  
 
-## Tools available
-You can use any tool of your choice, but we recommend to use the following two models via huggingfaces free API 
+If you update `pyproject.toml`, run:
 
-Embedding model: https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2
-Generation model: https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct
+```bash
+uv lock           # updates `uv.lock` to match `pyproject.toml` 
+```
 
+Then, activate the env:
 
-Some huggingface documentation to get you started: https://huggingface.co/blog/getting-started-with-embeddings
-https://huggingface.co/docs/huggingface_hub/en/package_reference/inference_client#huggingface_hub.InferenceClient.chat_completion
+```bash
+source .venv/bin/activate
+```
 
+#### 4. Running the project
+- To index old tickets:
+    ```bash
+    python src/build_index.py
+    ```
+    
+- To launch the application:
+    ```bash
+    chainlit run scripts/app.py
+    ```
 
+## 4. Key Components & Approach
 
+### src/build_index.py
+- Loads spreadsheet (CSV/XLSX) or JSON data of resolved tickets via `load_dataframe_from_file` and `load_json_file`
+- Converts each row to a `Document` object via `row_to_doc`, including metadata (`id`, `title`, `category`, `date`, `agent`)
+- Deduplicates documents by ticket-ID using `deduplicate_documents`
+- Embeds documents using `HuggingFaceEmbeddings` and stores them in a `Chroma` vector-store
+- Controlled via environment variables (e.g., `OLD_TICKETS_DIR`, `CHROMA_DIR`, `COLLECTION`, `RESET`)
+
+### scripts/app.py
+- Builds a retriever from the vector-store (`build_retriever`)
+- Builds a chat model endpoint (`build_chat_model`) via `HuggingFaceEndpoint`
+- Defines a prompt middleware (`prompt_with_context`) that:
+    - Retrieves the top-k similar past tickets for the incoming ticket description
+    - Ensures unique IDs (deduplication) in the context
+    - Injects the context into a structured system prompt (specifying instructions, referencing past ticket IDs, providing a suggestion)
+- Chains retrieval + generation into an interactive app (via Chainlit)
+- The UI includes “starters” to ease typical ticket queries
+
+## 5. Assumptions
+- We assume that resolved tickets are meaningfully similar to future incoming tickets (e.g., category, issue type)
+- We set `k = 3` for retrieval by default, giving the top-3 most similar past tickets
+- Suggestions are **directions** rather than full solutions -> the agent still needs to check answers
+- The system is intended for internal agents, not end-customers, therefore IT-help-desk knowledge is required
+- The user query is clear enough to run a semantic similarity search that will return meaningful results
+
+## 6. Experimentation & Results
+- Unit-tests validate data loading, conversion, deduplication, and retrieval behaviour
+- Evaluation uses `"new tickets”` data as queries and measures retrieval metrics: `Hit@K`, `Precision@K`, `Recall@K`, `MRR`
+- **Early findings**:
+    - Retrieval reliably finds “exact match” in past tickets for many query types
+    - On some categories (e.g. server access) older tickets are missing -> retrieval fails or suggests generic direction
+    - The suggestion generation respects the format (includes “Referenced Ticket IDs: [...]”) and avoids simple echoing of the query
+- **Shortcomings observed**:
+    - When no close past ticket exists, the context may be weak, leading to less useful suggestions
+    - The vector-store may embed documents with similar wording but different root causes, leading to ambiguous context
+    - No feedback loop currently captures whether the suggestion actually helped the agent (lack of production usage metric)
+
+## 7. Further Work (if more time)
+- Improve metadata filtering: e.g., restrict retrieval to same “Category” to increase relevance
+	- Helps avoid retrieving tickets from unrelated categories that might confuse the suggestion
+- Introduce reranking of retrieval results (hybrid embedding + keyword matching)
+	- Combine semantic embeddings with keyword-matching and then rerank results
+	- Reranking can be done using a custom scoring function (cos-sim + keyword-match + metadata-match)
+- Add evaluation feedback loop (Positive / Negative answer)
+	- Label which retrievals were useful and which were not
+	- Can lead to improvement over time
+	- Use this in metadata matching
+- Enhance the UI
+	- Allow agent to see retrieved ticket summaries & click-through to full resolution logs -> Detail Pop-Up
+- Provide fallback logic
+	- When low similarity score -> Prompt the agent to escalate or seek expert support
+	- Low Confidence should be detected (e.g via low similarity score)
+- Deploy into production
+	- Containerise the app -> Docker
+	- Set up CI/CD -> GitHub Actions
+	- Enable scalable hosting -> Kubernetes
+	- Monitoring and logging of usage + latency -> Grafana, Prometheus
